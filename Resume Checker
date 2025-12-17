@@ -1,0 +1,202 @@
+import streamlit as st
+import re
+import spacy
+from pdfminer.high_level import extract_text
+from docx import Document
+from sklearn.metrics.pairwise import cosine_similarity
+from sentence_transformers import SentenceTransformer
+import plotly.graph_objects as go
+from collections import Counter
+
+# --- CONFIGURATION ---
+st.set_page_config(
+    page_title="AI Smart ATS Resume Checker",
+    page_icon="🚀",
+    layout="wide"
+)
+
+# --- CACHED RESOURCES (Loads once to speed up app) ---
+@st.cache_resource
+def load_nlp_models():
+    # Load Spacy for keyword extraction
+    nlp = spacy.load("en_core_web_sm")
+    # Load BERT model for semantic similarity (Deep Learning)
+    bert_model = SentenceTransformer('all-MiniLM-L6-v2')
+    return nlp, bert_model
+
+nlp, bert_model = load_nlp_models()
+
+# --- HELPER FUNCTIONS ---
+
+def extract_text_from_pdf(uploaded_file):
+    try:
+        return extract_text(uploaded_file)
+    except:
+        return ""
+
+def extract_text_from_docx(uploaded_file):
+    try:
+        doc = Document(uploaded_file)
+        return "\n".join([para.text for para in doc.paragraphs])
+    except:
+        return ""
+
+def clean_text(text):
+    # Remove newlines and extra spaces
+    text = text.replace('\n', ' ')
+    text = re.sub('\s+', ' ', text).strip()
+    return text
+
+def extract_contact_info(text):
+    # Simple regex for email and phone
+    email = re.findall(r'\S+@\S+', text)
+    # Basic phone regex (can be improved based on region)
+    phone = re.findall(r'\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}', text)
+    return email, phone
+
+def get_semantic_score(resume_text, jd_text):
+    # Encode text into vectors (numbers) that represent meaning
+    embeddings = bert_model.encode([resume_text, jd_text])
+    # Compare the two vectors
+    score = cosine_similarity([embeddings[0]], [embeddings[1]])[0][0]
+    return round(score * 100, 1)
+
+def extract_important_words(text):
+    # Use NLP to find Nouns and Proper Nouns (Skills usually fall here)
+    doc = nlp(text.lower())
+    keywords = [token.text for token in doc if token.pos_ in ['NOUN', 'PROPN'] and not token.is_stop]
+    return set(keywords)
+
+# --- UI LAYOUT ---
+
+# Sidebar
+with st.sidebar:
+    st.image("https://cdn-icons-png.flaticon.com/512/3135/3135679.png", width=80)
+    st.title("ATS Pro Checker")
+    st.info("This tool uses Deep Learning (BERT) to compare the *meaning* of your resume against the job description, not just keyword counting.")
+    
+    st.markdown("### 📝 Instructions")
+    st.markdown("1. Paste the **Job Description**.")
+    st.markdown("2. Upload your **Resume** (PDF/DOCX).")
+    st.markdown("3. Get your **AI Score**.")
+
+# Main Content
+st.header("🚀 AI-Powered Resume Optimizer")
+st.markdown("---")
+
+col_input_1, col_input_2 = st.columns(2)
+
+with col_input_1:
+    jd_text = st.text_area("1️⃣ Paste Job Description Here", height=300, placeholder="Copy and paste the full JD here...")
+
+with col_input_2:
+    uploaded_file = st.file_uploader("2️⃣ Upload Resume", type=['pdf', 'docx'])
+    if uploaded_file:
+        st.success(f"File '{uploaded_file.name}' uploaded successfully!")
+
+analyze_button = st.button("🔍 Analyze My Resume", type="primary", use_container_width=True)
+
+# --- ANALYSIS LOGIC ---
+
+if analyze_button:
+    if not jd_text or not uploaded_file:
+        st.warning("⚠️ Please provide both a Job Description and a Resume file.")
+    else:
+        with st.spinner("🤖 AI is reading your resume and comparing it to the job..."):
+            
+            # 1. Text Extraction
+            if uploaded_file.name.endswith(".pdf"):
+                resume_raw = extract_text_from_pdf(uploaded_file)
+            else:
+                resume_raw = extract_text_from_docx(uploaded_file)
+                
+            if not resume_raw:
+                st.error("Could not read text from the file. Please try a different file.")
+                st.stop()
+
+            # 2. Cleaning
+            resume_clean = clean_text(resume_raw)
+            jd_clean = clean_text(jd_text)
+
+            # 3. Calculations
+            ai_match_score = get_semantic_score(resume_clean, jd_clean)
+            emails, phones = extract_contact_info(resume_raw)
+            
+            # Keywords analysis
+            jd_keywords = extract_important_words(jd_clean)
+            resume_keywords = extract_important_words(resume_clean)
+            missing_keywords = list(jd_keywords - resume_keywords)
+            
+            # Filter missing keywords to remove junk (short words)
+            missing_keywords = [w for w in missing_keywords if len(w) > 3]
+
+        # --- RESULTS DASHBOARD ---
+        
+        st.markdown("---")
+        st.subheader("📊 Analysis Report")
+        
+        # 1. Score Gauge
+        col1, col2, col3 = st.columns([1, 1, 1])
+        
+        with col2:
+            fig = go.Figure(go.Indicator(
+                mode = "gauge+number",
+                value = ai_match_score,
+                domain = {'x': [0, 1], 'y': [0, 1]},
+                title = {'text': "AI Match Score"},
+                gauge = {
+                    'axis': {'range': [0, 100]},
+                    'bar': {'color': "darkblue"},
+                    'steps': [
+                        {'range': [0, 50], 'color': "#ffcccb"},
+                        {'range': [50, 75], 'color': "#ffffcc"},
+                        {'range': [75, 100], 'color': "#90ee90"}],
+                }
+            ))
+            fig.update_layout(height=250, margin=dict(l=10, r=10, t=40, b=10))
+            st.plotly_chart(fig, use_container_width=True)
+
+        # 2. Key Insights
+        col_res1, col_res2 = st.columns(2)
+        
+        with col_res1:
+            st.subheader("✅ Detected Info")
+            if emails: st.success(f"**Email:** {emails[0]}") 
+            else: st.error("❌ No Email Found")
+            
+            if phones: st.success(f"**Phone:** {phones[0]}") 
+            else: st.warning("⚠️ No Phone Number Found")
+            
+            word_count = len(resume_clean.split())
+            if 400 < word_count < 1000:
+                st.success(f"**Word Count:** {word_count} (Optimal)")
+            else:
+                st.warning(f"**Word Count:** {word_count} (Aim for 400-1000 words)")
+
+        with col_res2:
+            st.subheader("⚠️ Missing Keywords")
+            st.write("The AI found these relevant words in the JD but **not** in your resume:")
+            
+            # Show top 15 missing keywords as chips
+            if missing_keywords:
+                st.markdown(
+                    " ".join([f"`{word}`" for word in missing_keywords[:15]]), 
+                    unsafe_allow_html=True
+                )
+            else:
+                st.success("Amazing! You have all the key keywords.")
+
+        # 3. Detailed Feedback
+        st.markdown("---")
+        st.subheader("💡 Actionable Advice")
+        
+        if ai_match_score < 60:
+            st.error("Critical: Your resume has low relevance to this job.")
+            st.write("- **Action:** Rewrite your summary to include the exact job title.")
+            st.write("- **Action:** Add the missing keywords listed above into your 'Skills' section.")
+        elif ai_match_score < 80:
+            st.warning("Good start, but needs tailoring.")
+            st.write("- **Action:** Try to weave the missing keywords into your bullet points, not just a list.")
+        else:
+            st.success("Excellent! Your resume is very well aligned.")
+            st.write("- **Action:** Focus on formatting and ensuring no typos.")
